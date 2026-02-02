@@ -1,14 +1,12 @@
 """
-GA4 Data Collector - Bemol Group (VERSÃO CORRIGIDA)
-Coleta dados completos para preenchimento das planilhas
-
-CORREÇÕES APLICADAS:
-1. Ajustado período para 2025 (evita erro de taxa de câmbio futura)
-2. Corrigido filtro OR para plataformas (Android/iOS)
-3. Adicionada validação para evitar Excel vazio
+GA4 Data Collector - Bemol Group
+Coleta dados completos para preenchimento das planilhas:
+- Bemol (web): Sessões e Receita totais
+- Bemol (App): Usuários ativos, Sessões e Receita
+- Bemol Farma: Sessões orgânicas, Usuários orgânicos, Taxa engajamento, Receita orgânica
 
 Author: Analytics Team
-Version: 2.1 - FIXED
+Version: 2.0
 """
 
 import os
@@ -44,11 +42,10 @@ class Config:
     TOKEN_FILE = 'token.pickle'
     SCOPES = ['https://www.googleapis.com/auth/analytics.readonly']
     
-    # ⚠️ IMPORTANTE: Período de análise ajustado para 2025
-    # Para 2026, aguarde até que haja dados históricos disponíveis
-    ANALYSIS_YEAR = '2025'
-    ANALYSIS_START = '2025-01-01'
-    ANALYSIS_END = '2025-12-31'
+    # Períodos de análise
+    ANALYSIS_YEAR = '2026'
+    ANALYSIS_START = '2026-01-01'
+    ANALYSIS_END = '2026-12-31'
     
     # Output
     OUTPUT_DIR = 'ga4_reports'
@@ -78,7 +75,7 @@ def setup_logging() -> logging.Logger:
     
     logger = logging.getLogger(__name__)
     logger.info("="*80)
-    logger.info("GA4 Complete Data Collector - Bemol Group (VERSÃO CORRIGIDA)")
+    logger.info("GA4 Complete Data Collector - Bemol Group")
     logger.info("="*80)
     
     return logger
@@ -233,8 +230,6 @@ def fetch_bemol_web_data(
             logger.info(f"✓ Coletados {len(df)} meses")
             logger.info(f"  Total Sessões: {df['Sessões totais (todos os canais)'].sum():,.0f}".replace(',', '.'))
             logger.info(f"  Total Receita: R$ {df['Receita total (todos os canais)'].sum():,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        else:
-            logger.warning("⚠️  Nenhum dado encontrado para Bemol Web")
         
         return df
         
@@ -243,7 +238,7 @@ def fetch_bemol_web_data(
         return None
 
 # ============================================================================
-# FUNÇÕES DE COLETA - BEMOL APP (CORRIGIDO)
+# FUNÇÕES DE COLETA - BEMOL APP
 # ============================================================================
 
 def fetch_bemol_app_data(
@@ -258,16 +253,14 @@ def fetch_bemol_app_data(
     - Sessões
     - Receita
     Filtros: platform IN ('Android', 'iOS')
-    
-    CORREÇÃO: Usando a sintaxe correta para filtro OR
     """
     try:
         logger.info("📱 Coletando dados: Bemol (App) - Usuários, Sessões e Receita")
         
-        # ✅ CORRIGIDO: Sintaxe correta para filtro OR
+        # Filtro para Android ou iOS
         platform_filter = FilterExpression(
-            or_group={
-                'expressions': [
+            or_group=FilterExpression.FilterExpressionList(
+                expressions=[
                     FilterExpression(
                         filter=Filter(
                             field_name='platform',
@@ -287,7 +280,7 @@ def fetch_bemol_app_data(
                         )
                     )
                 ]
-            }
+            )
         )
         
         request = RunReportRequest(
@@ -339,8 +332,6 @@ def fetch_bemol_app_data(
             logger.info(f"  Total Usuários: {df['Usuários ativos'].sum():,.0f}".replace(',', '.'))
             logger.info(f"  Total Sessões: {df['Sessões'].sum():,.0f}".replace(',', '.'))
             logger.info(f"  Total Receita: R$ {df['Receita'].sum():,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        else:
-            logger.warning("⚠️  Nenhum dado encontrado para Bemol App")
         
         return df
         
@@ -435,8 +426,6 @@ def fetch_bemol_farma_data(
             logger.info(f"  Total Usuários: {df['Usuários orgânicos'].sum():,.0f}".replace(',', '.'))
             logger.info(f"  Engajamento médio: {df['Taxa de engajamento (%)'].mean():.2f}%")
             logger.info(f"  Total Receita: R$ {df['Receita orgânica'].sum():,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        else:
-            logger.warning("⚠️  Nenhum dado encontrado para Bemol Farma")
         
         return df
         
@@ -445,7 +434,7 @@ def fetch_bemol_farma_data(
         return None
 
 # ============================================================================
-# EXPORTAÇÃO EXCEL (COM VALIDAÇÃO)
+# EXPORTAÇÃO EXCEL
 # ============================================================================
 
 def export_to_excel(
@@ -455,19 +444,6 @@ def export_to_excel(
 ) -> str:
     """Exporta todos os dados para Excel com 3 sheets"""
     try:
-        # ✅ VALIDAÇÃO: Verificar se há pelo menos um DataFrame válido
-        valid_dfs = []
-        if df_bemol_web is not None and not df_bemol_web.empty:
-            valid_dfs.append(('Bemol (web)', df_bemol_web))
-        if df_bemol_app is not None and not df_bemol_app.empty:
-            valid_dfs.append(('Bemol (App)', df_bemol_app))
-        if df_bemol_farma is not None and not df_bemol_farma.empty:
-            valid_dfs.append(('Bemol Farma', df_bemol_farma))
-        
-        if not valid_dfs:
-            logger.error("❌ Nenhum dado para exportar!")
-            return ""
-        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'GA4_Bemol_Complete_{Config.ANALYSIS_YEAR}_{timestamp}.xlsx'
         filepath = os.path.join(Config.OUTPUT_DIR, filename)
@@ -475,9 +451,17 @@ def export_to_excel(
         logger.info("📝 Gerando arquivo Excel...")
         
         with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
-            for sheet_name, df in valid_dfs:
-                df.to_excel(writer, sheet_name=sheet_name, index=False)
-                logger.info(f"  ✓ Sheet: {sheet_name}")
+            if df_bemol_web is not None and not df_bemol_web.empty:
+                df_bemol_web.to_excel(writer, sheet_name='Bemol (web)', index=False)
+                logger.info("  ✓ Sheet: Bemol (web)")
+            
+            if df_bemol_app is not None and not df_bemol_app.empty:
+                df_bemol_app.to_excel(writer, sheet_name='Bemol (App)', index=False)
+                logger.info("  ✓ Sheet: Bemol (App)")
+            
+            if df_bemol_farma is not None and not df_bemol_farma.empty:
+                df_bemol_farma.to_excel(writer, sheet_name='Bemol Farma', index=False)
+                logger.info("  ✓ Sheet: Bemol Farma")
         
         # Formatação
         wb = load_workbook(filepath)
@@ -561,7 +545,7 @@ def main():
     """Função principal"""
     try:
         print("\n" + "="*80)
-        print("GA4 COMPLETE DATA COLLECTOR - BEMOL GROUP (VERSÃO CORRIGIDA)")
+        print("GA4 COMPLETE DATA COLLECTOR - BEMOL GROUP")
         print("="*80)
         print(f"Período: {Config.ANALYSIS_START} a {Config.ANALYSIS_END}")
         print(f"Propriedades:")
@@ -622,18 +606,6 @@ def main():
         logger.info("="*80 + "\n")
         
         excel_path = export_to_excel(df_bemol_web, df_bemol_app, df_bemol_farma)
-        
-        if not excel_path:
-            print("\n" + "="*80)
-            print("⚠️  ATENÇÃO: Nenhum dado foi coletado")
-            print("="*80)
-            print("\nPossíveis causas:")
-            print("1. Período sem dados disponíveis")
-            print("2. Propriedades sem permissão de acesso")
-            print("3. Filtros muito restritivos")
-            print("\nVerifique o log em: ga4_reports/ga4_complete_collector.log")
-            print("="*80 + "\n")
-            return
         
         # ====================================================================
         # RESUMO FINAL

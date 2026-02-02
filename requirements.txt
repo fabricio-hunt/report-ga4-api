@@ -1,0 +1,20 @@
+# GA4 Complete Data Collector - Dependências
+# Instale com: pip install -r requirements.txt
+
+# Google Analytics Data API
+google-analytics-data>=0.18.0
+
+# Autenticação Google OAuth
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.1.0
+google-auth>=2.22.0
+
+# Manipulação de dados
+pandas>=2.0.0
+
+# Exportação Excel
+openpyxl>=3.1.0
+
+# Biblioteca pickle já vem com Python
+# Biblioteca logging já vem com Python
+# Biblioteca datetime já vem com Python

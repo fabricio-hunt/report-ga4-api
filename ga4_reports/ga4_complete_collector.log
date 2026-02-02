@@ -1,0 +1,17 @@
+2026-02-02 13:38:47 | INFO     | Iniciando autenticação
+2026-02-02 13:38:47 | INFO     | ✓ Credenciais carregadas
+2026-02-02 13:38:47 | INFO     | Renovando credenciais...
+2026-02-02 13:38:48 | INFO     | ✓ Credenciais renovadas
+2026-02-02 13:38:48 | INFO     | ✓ Cliente GA4 criado com sucesso
+2026-02-02 13:38:48 | INFO     | Iniciando coleta...
+2026-02-02 13:38:48 | INFO     | 📊 Coletando dados: Bemol (web)
+2026-02-02 13:38:53 | INFO     | ✓ Bemol Web: 12 meses coletados (incluindo vazios)
+2026-02-02 13:38:53 | INFO     | 📱 Coletando dados: Bemol (App)
+2026-02-02 13:38:55 | INFO     | ✓ Bemol App: 12 meses coletados
+2026-02-02 13:38:55 | INFO     | 🏥 Coletando dados: Bemol Farma
+2026-02-02 13:38:58 | INFO     | ✓ Bemol Farma: 12 meses coletados
+2026-02-02 13:38:58 | INFO     | 📝 Gerando arquivo Excel...
+2026-02-02 13:38:58 | INFO     |   ✓ Sheet: Bemol (web)
+2026-02-02 13:38:58 | INFO     |   ✓ Sheet: Bemol (App)
+2026-02-02 13:38:58 | INFO     |   ✓ Sheet: Bemol Farma
+2026-02-02 13:38:58 | INFO     | ✅ Arquivo Excel criado: ga4_reports\GA4_Bemol_Complete_2025_20260202_133858.xlsx
