@@ -1,0 +1,49 @@
+properties:
+  ecommerce_bemol: "272846783"
+  bemol_farma: "374507450"
+
+scopes:
+  - "https://www.googleapis.com/auth/analytics.readonly"
+
+organic_sources:
+  main:
+    - "google-play / organic"
+    - "google / organic"
+    - "bing / organic"
+    - "yahoo / organic"
+    - "duckduckgo / organic"
+    - "ecosia.org / organic"
+    - "yandex / organic"
+    - "awin / organic"
+  bemol_app:
+    - "google / organic"
+    - "bing / organic"
+    - "duckduckgo / organic"
+    - "ecosia.org / organic"
+    - "yahoo / organic"
+    - "yandex / organic"
+    - "aol / organic"
+
+periods:
+  main:
+    analysis_start: "2026-05-01"
+    analysis_end: "2026-05-31"
+  bemol_app:
+    analysis_start: "2025-01-01"
+    analysis_end: "2026-05-31"
+  farma_comparacao:
+    analysis_start_2025: "2025-01-01"
+    analysis_end_2025: "2025-12-31"
+    analysis_start_2026: "2026-01-01"
+    analysis_end_2026: "2026-05-31"
+
+auth:
+  client_secret_file: "client_secret.json"
+  token_file: "token.pickle"
+  secret_scope: "ga4-oauth"
+  client_secret_key: "client_secret_json"
+  refresh_token_key: "refresh_token"
+
+output:
+  local_default: "C:\\Users\\fabricio.barauna\\OneDrive - BEMOL S A\\Documentos"
+  databricks_default: "/Volumes/<catalog>/<schema>/<volume>/ga4_reports"

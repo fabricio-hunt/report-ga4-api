@@ -1,0 +1,13 @@
+client_secret.json
+token.pickle
+*.pickle
+ga4_reports/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.vscode/
+.env
+.DS_Store
