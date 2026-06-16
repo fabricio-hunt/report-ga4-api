@@ -1,0 +1,371 @@
+"""
+GA4 Data Collector - Bemol Group (v5.4 - Farma Web Organic Focus)
+Coleta do Total de Usuários orgânicos filtrados pela plataforma WEB.
+Período configurado: Jan-Dez 2025 e Jan-Mai 2026.
+
+Author: Analytics Team
+Version: 5.4
+"""
+
+import os
+import logging
+import pickle
+from datetime import datetime
+from typing import Optional
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    RunReportRequest, DateRange, Dimension, Metric,
+    FilterExpression, Filter, FilterExpressionList
+)
+
+# ============================================================================
+# CONFIGURAÇÃO  ←  EDITE AQUI
+# ============================================================================
+
+class Config:
+    PROPERTIES = {
+        'ecommerce_bemol': '272846783',
+        'bemol_farma':     '374507450',
+    }
+
+    CLIENT_SECRET_FILE = 'client_secret.json'
+    TOKEN_FILE         = 'token.pickle'
+    SCOPES             = ['https://www.googleapis.com/auth/analytics.readonly']
+
+    # ---------------------------------------------------------------
+    #  ★  PERÍODO DE ANÁLISE — Contemplando Jan/2025 a Mai/2026
+    # ---------------------------------------------------------------
+    ANALYSIS_START = '2025-01-01'
+    ANALYSIS_END   = '2026-05-31'
+    # ---------------------------------------------------------------
+
+    OUTPUT_DIR = 'ga4_reports'
+    LOG_FILE   = 'ga4_collector.log'
+
+    # Fontes atualizadas conforme sua solicitação
+    ORGANIC_SOURCES = [
+        'google / organic',
+        'bing / organic',
+        'duckduckgo / organic',
+        'ecosia.org / organic',
+        'yahoo / organic',
+        'yandex / organic',
+        'aol / organic',
+    ]
+
+# ============================================================================
+# NOMES DOS MESES (PT-BR)
+# ============================================================================
+
+MONTH_NAMES = {
+    '01': 'Janeiro',  '02': 'Fevereiro', '03': 'Março',
+    '04': 'Abril',    '05': 'Maio',      '06': 'Junho',
+    '07': 'Julho',    '08': 'Agosto',    '09': 'Setembro',
+    '10': 'Outubro',  '11': 'Novembro',  '12': 'Dezembro',
+}
+
+# ============================================================================
+# HELPERS — FILTROS GA4
+# ============================================================================
+
+def _or_filter(field: str, values: list[str]) -> FilterExpression:
+    return FilterExpression(
+        or_group=FilterExpressionList(expressions=[
+            FilterExpression(filter=Filter(
+                field_name=field,
+                string_filter=Filter.StringFilter(
+                    match_type=Filter.StringFilter.MatchType.EXACT,
+                    value=v,
+                )
+            )) for v in values
+        ])
+    )
+
+def _and_filter(*expressions: FilterExpression) -> FilterExpression:
+    return FilterExpression(
+        and_group=FilterExpressionList(expressions=list(expressions))
+    )
+
+def organic_filter() -> FilterExpression:
+    return _or_filter('sessionSourceMedium', Config.ORGANIC_SOURCES)
+
+def web_platform_filter() -> FilterExpression:
+    return _or_filter('platform', ['web'])
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+def setup_logging() -> logging.Logger:
+    os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+    log_path = os.path.join(Config.OUTPUT_DIR, Config.LOG_FILE)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_path, encoding='utf-8'),
+            logging.StreamHandler(),
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+# ============================================================================
+# AUTENTICAÇÃO
+# ============================================================================
+
+def authenticate_ga4() -> Optional[BetaAnalyticsDataClient]:
+    try:
+        creds = None
+        if os.path.exists(Config.TOKEN_FILE):
+            with open(Config.TOKEN_FILE, 'rb') as f:
+                creds = pickle.load(f)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    Config.CLIENT_SECRET_FILE, Config.SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+            with open(Config.TOKEN_FILE, 'wb') as f:
+                pickle.dump(creds, f)
+        return BetaAnalyticsDataClient(credentials=creds)
+    except Exception as e:
+        logger.error(f"Erro na autenticação: {e}")
+        return None
+
+# ============================================================================
+# PROCESSAMENTO — ROWS → DATAFRAME
+# ============================================================================
+
+def _process_rows(rows, metric_map: dict[int, str]) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        dims = [d.value for d in row.dimension_values]
+        month_num = dims[0]
+        year      = dims[1]
+
+        record = {
+            'Mês':      MONTH_NAMES.get(month_num, month_num),
+            'Nº Mês':   month_num,
+            'Ano':      year,
+        }
+        for pos, col_name in metric_map.items():
+            raw = row.metric_values[pos].value
+            record[col_name] = float(raw) if '.' in raw else int(raw)
+
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df = df.sort_values(['Ano', 'Nº Mês']).reset_index(drop=True)
+    df = df.drop(columns=['Nº Mês'])
+    return df
+
+
+def _date_range() -> DateRange:
+    return DateRange(
+        start_date=Config.ANALYSIS_START,
+        end_date=Config.ANALYSIS_END,
+    )
+
+# ============================================================================
+# COLETA — BEMOL FARMA (Web + Orgânico)
+# ============================================================================
+
+def fetch_bemol_farma_web_organic(client: BetaAnalyticsDataClient) -> Optional[pd.DataFrame]:
+    logger.info("🏥 Coletando: Bemol Farma (Web + Orgânico)")
+    prop = f"properties/{Config.PROPERTIES['bemol_farma']}"
+
+    try:
+        req = RunReportRequest(
+            property=prop,
+            dimensions=[Dimension(name='month'), Dimension(name='year')],
+            metrics=[
+                Metric(name='totalUsers'), # <-- MUDANÇA PARA TOTAL USERS AQUI
+                Metric(name='sessions'),
+                Metric(name='transactions'),
+                Metric(name='totalRevenue'),
+                Metric(name='engagementRate'),
+            ],
+            date_ranges=[_date_range()],
+            dimension_filter=_and_filter(web_platform_filter(), organic_filter()), # Filtros cruzados
+        )
+        resp = client.run_report(request=req)
+        df = _process_rows(
+            resp.rows,
+            {
+                0: 'Farma Web Total de Usuários', # Renomeado para maior clareza
+                1: 'Farma Web Sessões',
+                2: 'Farma Web Transações',
+                3: 'Farma Web Receita (R$)',
+                4: 'Farma Web Engajamento (%)',
+            },
+        )
+        
+        if 'Farma Web Engajamento (%)' in df.columns:
+            df['Farma Web Engajamento (%)'] = (
+                df['Farma Web Engajamento (%)'] * 100
+            ).round(2)
+
+        col_order = [
+            'Ano', 'Mês', 
+            'Farma Web Total de Usuários', 
+            'Farma Web Sessões',
+            'Farma Web Transações', 
+            'Farma Web Receita (R$)', 
+            'Farma Web Engajamento (%)'
+        ]
+        col_order = [c for c in col_order if c in df.columns]
+        df = df[col_order]
+
+        return df
+
+    except Exception as e:
+        logger.error(f"Erro Bemol Farma Web: {e}")
+        return None
+
+# ============================================================================
+# EXPORTAÇÃO EXCEL
+# ============================================================================
+
+FILL_HEADER  = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+FILL_ROW_ALT = PatternFill(start_color='EBF3FB', end_color='EBF3FB', fill_type='solid')
+FONT_HEADER  = Font(name='Arial', color='FFFFFF', bold=True, size=11)
+FONT_DATA    = Font(name='Arial', size=10)
+FONT_TITLE   = Font(name='Arial', bold=True, size=13, color='1F4E79')
+
+THIN = Side(style='thin', color='BFBFBF')
+BORDER_THIN = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+CURRENCY_KEYWORDS = ['Receita']
+PCT_KEYWORDS = ['Engajamento']
+
+def _col_number_format(col_name: str) -> Optional[str]:
+    if any(k in col_name for k in CURRENCY_KEYWORDS):
+        return 'R$ #,##0.00'
+    if any(k in col_name for k in PCT_KEYWORDS):
+        return '0.00"%"'
+    return None
+
+def _format_sheet(ws, title: str, period: str) -> None:
+    ws.insert_rows(1, 2)
+    ws['A1'] = title
+    ws['A1'].font = FONT_TITLE
+    ws['A2'] = f"Período: {period}"
+    ws['A2'].font = Font(name='Arial', italic=True, size=10, color='595959')
+
+    header_row = 3
+    data_start  = 4
+
+    for cell in ws[header_row]:
+        cell.fill = FILL_HEADER
+        cell.font = FONT_HEADER
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = BORDER_THIN
+
+    ws.row_dimensions[header_row].height = 30
+    max_row = ws.max_row
+
+    for row_idx in range(data_start, max_row + 1):
+        fill = FILL_ROW_ALT if (row_idx - data_start) % 2 == 1 else None
+        for cell in ws[row_idx]:
+            cell.font = FONT_DATA
+            cell.border = BORDER_THIN
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            if fill:
+                cell.fill = fill
+
+            if cell.column > 2:
+                col_name = ws.cell(row=header_row, column=cell.column).value or ''
+                fmt = _col_number_format(col_name)
+                if fmt:
+                    cell.number_format = fmt
+                elif isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0'
+
+    for col in ws.iter_cols(min_row=header_row, max_row=max_row):
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            try:
+                length = len(str(cell.value)) if cell.value is not None else 0
+                max_len = max(max_len, length)
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 14), 30)
+
+    ws.freeze_panes = ws.cell(row=data_start, column=1)
+
+def export_to_excel(df_farma_web: Optional[pd.DataFrame]) -> str:
+    try:
+        period_label = f"{Config.ANALYSIS_START} a {Config.ANALYSIS_END}"
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename  = f'GA4_Farma_Web_Organic_{Config.ANALYSIS_START[:4]}-{Config.ANALYSIS_END[:4]}_{timestamp}.xlsx'
+        filepath  = os.path.join(Config.OUTPUT_DIR, filename)
+
+        sheets = {}
+        if df_farma_web is not None and not df_farma_web.empty:
+            sheets['Bemol Farma Web'] = ('Farma (Web + Orgânico)', df_farma_web)
+
+        if not sheets:
+            logger.warning("Nenhum dado coletado para exportar.")
+            return ''
+
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            for sheet_name, (_, df) in sheets.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        wb = load_workbook(filepath)
+        for sheet_name, (title, _) in sheets.items():
+            _format_sheet(wb[sheet_name], title=title, period=period_label)
+        wb.save(filepath)
+
+        logger.info(f"✅ Arquivo salvo: {filepath}")
+        return filepath
+
+    except Exception as e:
+        logger.error(f"Erro na exportação: {e}")
+        return ''
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main() -> None:
+    print(f"""
+╔══════════════════════════════════════════════════════╗
+║      GA4 Collector: Farma Web Orgânico — v5.4        ║
+╠══════════════════════════════════════════════════════╣
+║  Período: {Config.ANALYSIS_START}  →  {Config.ANALYSIS_END}  ║
+╚══════════════════════════════════════════════════════╝
+""")
+
+    client = authenticate_ga4()
+    if not client:
+        logger.error("Falha na autenticação. Encerrando.")
+        return
+
+    df_farma_web = fetch_bemol_farma_web_organic(client)
+
+    path = export_to_excel(df_farma_web)
+    
+    if path:
+        print(f"\n✅ Relatório gerado com sucesso:\n   {path}\n")
+    else:
+        print("\n❌ Nenhum arquivo gerado. Verifique os logs.\n")
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,408 @@
+"""
+GA4 Data Collector - Bemol Farma (v6.0 - Web Total)
+Coleta Farma Web Total (sessões, usuários, engajamento, receita, transações).
+Filtro orgânico removido. Apenas tráfego Web.
+
+Período configurado: Jan-Dez 2025 e Jan-Mai 2026.
+"""
+
+import os
+import logging
+import pickle
+from datetime import datetime
+from typing import Optional
+import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import (
+    RunReportRequest, DateRange, Dimension, Metric,
+    FilterExpression, Filter, FilterExpressionList
+)
+
+# ============================================================================
+# CONFIGURAÇÃO  ←  EDITE AQUI
+# ============================================================================
+
+class Config:
+    PROPERTIES = {
+        'bemol_farma': '374507450',
+    }
+
+    CLIENT_SECRET_FILE = 'client_secret.json'
+    TOKEN_FILE         = 'token.pickle'
+    SCOPES             = ['https://www.googleapis.com/auth/analytics.readonly']
+
+    # ---------------------------------------------------------------
+    #  ★  PERÍODOS DE ANÁLISE
+    # ---------------------------------------------------------------
+    ANALYSIS_START_2025 = '2025-01-01'
+    ANALYSIS_END_2025   = '2025-12-31'
+
+    ANALYSIS_START_2026 = '2026-01-01'
+    ANALYSIS_END_2026   = '2026-05-31'
+
+    OUTPUT_DIR = 'ga4_reports'
+    LOG_FILE   = 'ga4_farma_collector.log'
+
+# ============================================================================
+# NOMES DOS MESES (PT-BR)
+# ============================================================================
+
+MONTH_NAMES = {
+    '01': 'Janeiro',  '02': 'Fevereiro', '03': 'Março',
+    '04': 'Abril',    '05': 'Maio',      '06': 'Junho',
+    '07': 'Julho',    '08': 'Agosto',    '09': 'Setembro',
+    '10': 'Outubro',  '11': 'Novembro',  '12': 'Dezembro',
+}
+
+# ============================================================================
+# HELPERS — FILTROS GA4
+# ============================================================================
+
+def _or_filter(field: str, values: list[str]) -> FilterExpression:
+    return FilterExpression(
+        or_group=FilterExpressionList(expressions=[
+            FilterExpression(filter=Filter(
+                field_name=field,
+                string_filter=Filter.StringFilter(
+                    match_type=Filter.StringFilter.MatchType.EXACT,
+                    value=v,
+                )
+            )) for v in values
+        ])
+    )
+
+def web_platform_filter() -> FilterExpression:
+    """Plataforma corresponde exatamente a 'web'"""
+    return _or_filter('platform', ['web'])
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+def setup_logging() -> logging.Logger:
+    os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+    log_path = os.path.join(Config.OUTPUT_DIR, Config.LOG_FILE)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)-8s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_path, encoding='utf-8'),
+            logging.StreamHandler(),
+        ]
+    )
+    return logging.getLogger(__name__)
+
+logger = setup_logging()
+
+# ============================================================================
+# AUTENTICAÇÃO
+# ============================================================================
+
+def authenticate_ga4() -> Optional[BetaAnalyticsDataClient]:
+    try:
+        creds = None
+        if os.path.exists(Config.TOKEN_FILE):
+            with open(Config.TOKEN_FILE, 'rb') as f:
+                creds = pickle.load(f)
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    Config.CLIENT_SECRET_FILE, Config.SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+            with open(Config.TOKEN_FILE, 'wb') as f:
+                pickle.dump(creds, f)
+        return BetaAnalyticsDataClient(credentials=creds)
+    except Exception as e:
+        logger.error(f"Erro na autenticação: {e}")
+        return None
+
+# ============================================================================
+# PROCESSAMENTO — ROWS → DATAFRAME
+# ============================================================================
+
+def _process_rows(rows, metric_map: dict[int, str]) -> pd.DataFrame:
+    records = []
+    for row in rows:
+        dims = [d.value for d in row.dimension_values]
+        month_num = dims[0]
+        year      = dims[1]
+
+        record = {
+            'Mês':    MONTH_NAMES.get(month_num, month_num),
+            'Nº Mês': month_num,
+            'Ano':    year,
+        }
+        for pos, col_name in metric_map.items():
+            raw = row.metric_values[pos].value
+            record[col_name] = float(raw) if '.' in raw else int(raw)
+
+        records.append(record)
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df = df.sort_values(['Ano', 'Nº Mês']).reset_index(drop=True)
+    df = df.drop(columns=['Nº Mês'])
+    return df
+
+def _date_range(start: str, end: str) -> DateRange:
+    return DateRange(start_date=start, end_date=end)
+
+# ============================================================================
+# COLETA — BEMOL FARMA  (Web Total)
+# ============================================================================
+
+def fetch_bemol_farma(client: BetaAnalyticsDataClient) -> Optional[pd.DataFrame]:
+    """
+    Coleta Farma Web Total com dois períodos separados:
+      - 2025: Jan–Dez  →  colunas sufixadas _2025
+      - 2026: Jan–Mai  →  colunas sufixadas _2026
+
+    Filtro aplicado:
+      platform EXACT 'web'
+
+    Métricas coletadas:
+      Farma_Sessões_Totais | Farma_Usuários_totais | Farma_Engajamento_total
+      Farma_Receita_total  | Farma_Transações_total
+    """
+    logger.info("🌿 Coletando: Bemol Farma (Web Total) — 2025 e 2026")
+    prop = f"properties/{Config.PROPERTIES['bemol_farma']}"
+
+    # Filtro apenas para WEB
+    dimension_filter = web_platform_filter()
+
+    def _fetch_period(start: str, end: str, suffix: str) -> Optional[pd.DataFrame]:
+        try:
+            req = RunReportRequest(
+                property=prop,
+                dimensions=[Dimension(name='month'), Dimension(name='year')],
+                metrics=[
+                    Metric(name='sessions'),           # Farma_Sessões_Totais
+                    Metric(name='totalUsers'),          # Farma_Usuários_totais
+                    Metric(name='engagementRate'),      # Farma_Engajamento_total
+                    Metric(name='totalRevenue'),        # Farma_Receita_total
+                    Metric(name='transactions'),        # Farma_Transações_total
+                ],
+                date_ranges=[_date_range(start, end)],
+                dimension_filter=dimension_filter,
+            )
+            resp = client.run_report(request=req)
+
+            metric_map = {
+                0: f'Farma_Sessões_Totais_{suffix}',
+                1: f'Farma_Usuários_totais_{suffix}',
+                2: f'Farma_Engajamento_total_{suffix}',
+                3: f'Farma_Receita_total_{suffix}',
+                4: f'Farma_Transações_total_{suffix}',
+            }
+            return _process_rows(resp.rows, metric_map)
+
+        except Exception as e:
+            logger.error(f"Erro Farma {suffix}: {e}")
+            return None
+
+    df_2025 = _fetch_period(
+        Config.ANALYSIS_START_2025,
+        Config.ANALYSIS_END_2025,
+        '2025',
+    )
+    df_2026 = _fetch_period(
+        Config.ANALYSIS_START_2026,
+        Config.ANALYSIS_END_2026,
+        '2026',
+    )
+
+    # ---------------------------------------------------------------
+    # Montar tabela consolidada:
+    # Linhas = meses.  2025 (Jan–Dez) à esquerda, 2026 (Jan–Mai) à direita.
+    # ---------------------------------------------------------------
+    frames = []
+    if df_2025 is not None and not df_2025.empty:
+        frames.append(df_2025)
+    if df_2026 is not None and not df_2026.empty:
+        frames.append(df_2026)
+
+    if not frames:
+        logger.warning("Farma: nenhum dado retornado para nenhum dos períodos.")
+        return None
+
+    df_all = pd.concat(frames, ignore_index=True, sort=False)
+
+    MONTH_ORDER = {v: k for k, v in MONTH_NAMES.items()}
+    df_all['_sort_mes'] = df_all['Mês'].map(MONTH_ORDER)
+    df_all['_sort_ano'] = df_all['Ano'].astype(str)
+
+    base_metrics = [
+        'Farma_Sessões_Totais',
+        'Farma_Usuários_totais',
+        'Farma_Engajamento_total',
+        'Farma_Receita_total',
+        'Farma_Transações_total',
+    ]
+
+    for m in base_metrics:
+        col_25 = f'{m}_2025'
+        col_26 = f'{m}_2026'
+        df_all[m] = df_all.get(col_25, pd.NA).fillna(df_all.get(col_26, pd.NA))
+
+    df_final = df_all[['Ano', 'Mês', '_sort_ano', '_sort_mes'] + base_metrics].copy()
+    df_final = df_final.sort_values(['_sort_ano', '_sort_mes']).reset_index(drop=True)
+    df_final = df_final.drop(columns=['_sort_ano', '_sort_mes'])
+
+    logger.info(
+        f"Farma coletado: {len(df_2025) if df_2025 is not None else 0} meses em 2025 | "
+        f"{len(df_2026) if df_2026 is not None else 0} meses em 2026"
+    )
+    return df_final
+
+# ============================================================================
+# EXPORTAÇÃO EXCEL
+# ============================================================================
+
+FILL_HEADER  = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
+FILL_ROW_ALT = PatternFill(start_color='EBF3FB', end_color='EBF3FB', fill_type='solid')
+FONT_HEADER  = Font(name='Arial', color='FFFFFF', bold=True, size=11)
+FONT_DATA    = Font(name='Arial', size=10)
+FONT_TITLE   = Font(name='Arial', bold=True, size=13, color='1F4E79')
+
+THIN = Side(style='thin', color='BFBFBF')
+BORDER_THIN = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+CURRENCY_KEYWORDS = ['Receita']
+PCT_KEYWORDS      = ['Engajamento']
+
+def _col_number_format(col_name: str) -> Optional[str]:
+    if any(k in col_name for k in CURRENCY_KEYWORDS):
+        return 'R$ #,##0.00'
+    if any(k in col_name for k in PCT_KEYWORDS):
+        return '0.00"%"'
+    return None
+
+def _format_sheet(ws, title: str, period: str) -> None:
+    ws.insert_rows(1, 2)
+    ws['A1'] = title
+    ws['A1'].font = FONT_TITLE
+    ws['A2'] = f"Período: {period}"
+    ws['A2'].font = Font(name='Arial', italic=True, size=10, color='595959')
+
+    header_row = 3
+    data_start  = 4
+
+    for cell in ws[header_row]:
+        cell.fill = FILL_HEADER
+        cell.font = FONT_HEADER
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = BORDER_THIN
+
+    ws.row_dimensions[header_row].height = 30
+    max_row = ws.max_row
+
+    for row_idx in range(data_start, max_row + 1):
+        fill = FILL_ROW_ALT if (row_idx - data_start) % 2 == 1 else None
+        for cell in ws[row_idx]:
+            cell.font = FONT_DATA
+            cell.border = BORDER_THIN
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            if fill:
+                cell.fill = fill
+
+            if cell.column > 2:
+                col_name = ws.cell(row=header_row, column=cell.column).value or ''
+                fmt = _col_number_format(col_name)
+                if fmt:
+                    cell.number_format = fmt
+                elif isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0'
+
+    for col in ws.iter_cols(min_row=header_row, max_row=max_row):
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            try:
+                length = len(str(cell.value)) if cell.value is not None else 0
+                max_len = max(max_len, length)
+            except Exception:
+                pass
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 14), 32)
+
+    ws.freeze_panes = ws.cell(row=data_start, column=1)
+
+def export_to_excel(df_farma: Optional[pd.DataFrame]) -> str:
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename  = f'GA4_Report_Farma_Total_{timestamp}.xlsx'
+        filepath  = os.path.join(Config.OUTPUT_DIR, filename)
+
+        sheets: dict[str, tuple[str, str, pd.DataFrame]] = {}
+
+        if df_farma is not None and not df_farma.empty:
+            period_farma = (
+                f"{Config.ANALYSIS_START_2025} a {Config.ANALYSIS_END_2025}"
+                f"  |  {Config.ANALYSIS_START_2026} a {Config.ANALYSIS_END_2026}"
+            )
+            sheets['Bemol Farma Web Total'] = (
+                'Farma — Web Total (Sessões, Usuários, Engajamento, Receita, Transações)',
+                period_farma,
+                df_farma,
+            )
+
+        if not sheets:
+            logger.warning("Nenhum dado coletado para exportar.")
+            return ''
+
+        with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+            for sheet_name, (_, _, df) in sheets.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        wb = load_workbook(filepath)
+        for sheet_name, (title, period, _) in sheets.items():
+            _format_sheet(wb[sheet_name], title=title, period=period)
+        wb.save(filepath)
+
+        logger.info(f"✅ Arquivo salvo: {filepath}")
+        return filepath
+
+    except Exception as e:
+        logger.error(f"Erro na exportação: {e}")
+        return ''
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+def main() -> None:
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║      GA4 Collector — v6.0 (Bemol Farma Web Total)            ║
+╠══════════════════════════════════════════════════════════════╣
+║  Farma : {Config.ANALYSIS_START_2025}  →  {Config.ANALYSIS_END_2025}  (2025)  ║
+║          {Config.ANALYSIS_START_2026}  →  {Config.ANALYSIS_END_2026}  (2026)  ║
+╚══════════════════════════════════════════════════════════════╝
+""")
+
+    client = authenticate_ga4()
+    if not client:
+        logger.error("Falha na autenticação. Encerrando.")
+        return
+
+    df_farma = fetch_bemol_farma(client)
+
+    path = export_to_excel(df_farma)
+    if path:
+        print(f"\n✅ Relatório gerado com sucesso:\n   {path}\n")
+    else:
+        print("\n❌ Nenhum arquivo gerado. Verifique os logs.\n")
+
+
+if __name__ == '__main__':
+    main()
